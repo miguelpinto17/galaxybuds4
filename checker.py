@@ -62,13 +62,12 @@ async def check_olx_new_listings(name: str, url: str) -> list:
                 if href and href.startswith("/"):
                     href = "https://www.olx.pt" + href
 
-                # Timestamp — OLX PT shows "Hoje, HH:MM" or "Hoje HH:MM"
-                time_el = await card.query_selector("[data-testid='location-date'], p")
-                time_text = (await time_el.inner_text()).strip() if time_el else ""
+                # Timestamp — search entire card text for "Hoje, HH:MM"
+                card_text = await card.inner_text()
 
-                print(f"  {title!r} | {time_text!r}")
+                print(f"  {title!r} | {card_text!r}")
 
-                match = re.search(r"[Hh]oje[,\s]+(\d{1,2}):(\d{2})", time_text)
+                match = re.search(r"[Hh]oje\s+às\s+(\d{1,2}):(\d{2})", card_text)
                 if match:
                     hour, minute = int(match.group(1)), int(match.group(2))
                     listing_time = now_pt.replace(hour=hour, minute=minute, second=0, microsecond=0)
