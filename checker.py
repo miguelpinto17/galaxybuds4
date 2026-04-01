@@ -62,10 +62,7 @@ async def check_olx_new_listings(name: str, url: str) -> list:
                 if href and href.startswith("/"):
                     href = "https://www.olx.pt" + href
 
-                # Timestamp — search entire card text for "Hoje, HH:MM"
                 card_text = await card.inner_text()
-
-                print(f"  {title!r} | {card_text!r}")
 
                 match = re.search(r"[Hh]oje\s+às\s+(\d{1,2}):(\d{2})", card_text)
                 if match:
