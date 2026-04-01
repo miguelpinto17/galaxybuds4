@@ -1,20 +1,16 @@
 import asyncio
 import os
-import json
+import re
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from playwright.async_api import async_playwright
 
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 
-PRODUCTS = [
+OLX_MONITORS = [
     {
-        "name": "Samsung Galaxy Buds4 Pro (Preto)",
-        "url": "https://www.vodafone.pt/loja/acessorios/som/samsung-galaxy-buds4-pro.html?segment=consumer&color=preto&paymentType=pvp",
-    },
-    {
-        "name": "Samsung Galaxy Buds4 Pro (Branco)",
-        "url": "https://www.vodafone.pt/loja/acessorios/som/samsung-galaxy-buds4-pro.html?segment=consumer&color=branco&paymentType=pvp",
+        "name": "Violoncelo",
+        "url": "https://www.olx.pt/ads/q-violoncelo/?search%5Border%5D=created_at:desc",
     },
 ]
 
@@ -28,8 +24,13 @@ def send_discord(message: str) -> None:
     response.raise_for_status()
 
 
-async def check_availability(url: str) -> bool:
-    api_stock: dict = {}
+async def check_olx_new_listings(name: str, url: str) -> list:
+    """Returns listings posted in the last 65 minutes."""
+    new_listings = []
+
+    # Portugal: UTC+1 (summer/WEST) — DST active from late March to late October
+    now_pt = datetime.now(timezone.utc) + timedelta(hours=1)
+    cutoff = now_pt - timedelta(minutes=65)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -42,92 +43,69 @@ async def check_availability(url: str) -> bool:
         )
         page = await context.new_page()
 
-        async def handle_response(response):
-            try:
-                r_url = response.url.lower()
-                if any(k in r_url for k in ["product", "stock", "catalog", "pdp", "item"]):
-                    if response.status == 200:
-                        ct = response.headers.get("content-type", "")
-                        if "json" in ct:
-                            data = await response.json()
-                            text = json.dumps(data).lower()
-                            if "stock" in text or "availability" in text:
-                                api_stock.update({"raw": data, "url": response.url})
-            except Exception:
-                pass
-
-        page.on("response", handle_response)
-
-        print(f"[{datetime.utcnow().isoformat()}] Loading: {url}")
+        print(f"[{datetime.utcnow().isoformat()}] Loading OLX: {url}")
         await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-        await page.wait_for_timeout(6_000)  # Extra time for Vue to render
+        await page.wait_for_timeout(4_000)
 
-        if api_stock:
-            raw = json.dumps(api_stock.get("raw", {})).lower()
-            print(f"API data captured from: {api_stock.get('url')}")
-            if "instock" in raw or '"stock":true' in raw or '"available":true' in raw:
-                await browser.close()
-                return True
-            if "outofstock" in raw or '"stock":false' in raw or '"available":false' in raw:
-                await browser.close()
-                return False
+        cards = await page.query_selector_all("[data-cy='l-card']")
+        print(f"OLX {name}: {len(cards)} anúncios encontrados")
 
-        btn = await page.query_selector("#add-to-cart-toast")
-        if btn:
-            classes = await btn.get_attribute("class") or ""
-            is_disabled = "button--disabled" in classes or "disabled" in classes
-            btn_text = (await btn.inner_text()).strip().lower()
-            print(f"Button found | classes: {classes!r} | text: {btn_text!r}")
-            if not is_disabled and btn_text and "indispon" not in btn_text and "esgot" not in btn_text:
-                await browser.close()
-                return True
-        else:
-            print("Button #add-to-cart-toast NOT found")
+        for card in cards:
+            try:
+                # Title
+                title_el = await card.query_selector("h4, h6, [data-testid='ad-title']")
+                title = (await title_el.inner_text()).strip() if title_el else "Sem título"
 
-        body_text = (await page.inner_text("body")).lower()
+                # Link
+                link_el = await card.query_selector("a")
+                href = await link_el.get_attribute("href") if link_el else None
+                if href and href.startswith("/"):
+                    href = "https://www.olx.pt" + href
 
-        unavailable_keywords = ["esgotado", "indisponível", "sem stock", "stockunavailable"]
-        available_keywords = ["adicionar ao carrinho", "adicionar", "stockavailable"]
+                # Timestamp — OLX PT shows "Hoje, HH:MM" or "Hoje HH:MM"
+                time_el = await card.query_selector("[data-testid='location-date'], p")
+                time_text = (await time_el.inner_text()).strip() if time_el else ""
 
-        for kw in available_keywords:
-            if kw in body_text:
-                await browser.close()
-                return True
+                print(f"  {title!r} | {time_text!r}")
 
-        for kw in unavailable_keywords:
-            if kw in body_text:
-                await browser.close()
-                return False
+                match = re.search(r"[Hh]oje[,\s]+(\d{1,2}):(\d{2})", time_text)
+                if match:
+                    hour, minute = int(match.group(1)), int(match.group(2))
+                    listing_time = now_pt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if listing_time >= cutoff:
+                        new_listings.append({"title": title, "url": href, "time": f"{hour:02d}:{minute:02d}"})
+
+            except Exception as e:
+                print(f"  Erro ao processar anúncio: {e}")
 
         await browser.close()
 
-    print("Could not determine availability — assuming unavailable.")
-    return False
+    return new_listings
 
 
 async def main():
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-    for product in PRODUCTS:
+    # OLX new listings monitor
+    for monitor in OLX_MONITORS:
         try:
-            available = await check_availability(product["url"])
-
-            if available:
-                msg = (
-                    f"🎉 **DISPONÍVEL!**\n"
-                    f"{product['name']} está disponível na Vodafone!\n"
-                    f"👉 {product['url']}\n"
-                    f"⏰ {now}"
-                )
-                send_discord(msg)
-                print(f"AVAILABLE — {product['name']} — Discord notification sent.")
+            new_listings = await check_olx_new_listings(monitor["name"], monitor["url"])
+            if new_listings:
+                for item in new_listings:
+                    msg = (
+                        f"🔔 **Novo anúncio OLX — {monitor['name']}**\n"
+                        f"{item['title']}\n"
+                        f"👉 {item['url']}\n"
+                        f"⏰ Publicado hoje às {item['time']}"
+                    )
+                    send_discord(msg)
+                    print(f"NEW LISTING: {item['title']}")
             else:
-                print(f"NOT available: {product['name']} — checked at {now}")
-
+                print(f"Sem novos anúncios OLX para {monitor['name']} — checked at {now}")
         except Exception as e:
-            print(f"ERROR checking {product['name']}: {e}")
+            print(f"ERROR checking OLX {monitor['name']}: {e}")
             try:
-                send_discord(f"⚠️ Erro no checker de {product['name']}:\n```{e}```")
+                send_discord(f"⚠️ Erro no OLX checker de {monitor['name']}:\n```{e}```")
             except Exception:
                 pass
 
