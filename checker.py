@@ -68,6 +68,9 @@ async def check_olx_new_listings(name: str, url: str) -> list:
                 if match:
                     hour, minute = int(match.group(1)), int(match.group(2))
                     listing_time = now_pt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    # Se a hora do anúncio é "no futuro", pertence ao dia anterior
+                    if listing_time > now_pt:
+                        listing_time -= timedelta(days=1)
                     if listing_time >= cutoff:
                         new_listings.append({"title": title, "url": href, "time": f"{hour:02d}:{minute:02d}"})
 
