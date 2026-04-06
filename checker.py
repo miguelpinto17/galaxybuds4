@@ -95,7 +95,8 @@ async def main():
                         f"🔔 **Novo anúncio OLX — {monitor['name']}**\n"
                         f"{item['title']}\n"
                         f"👉 {item['url']}\n"
-                        f"⏰ Publicado hoje às {item['time']}"
+                        f"⏰ Publicado hoje às {item['time']}\n"
+                        f"🕐 Detetado às {now}"
                     )
                     send_discord(msg)
                     print(f"NEW LISTING: {item['title']}")
